@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	source      = flag.String("source", "http://content-riak-ams-1.int.avs.io:8098", "")
+	source      = flag.String("source", "http://riak-0.riak:8098", "")
 	destination = flag.String("destination", "http://riak-0.riak:8098", "")
 	bucketTypes = flag.String("bucket-types", "default,sets,maps", "")
 	parallel    = flag.Int("parallel", 10, "")
