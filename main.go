@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,11 +21,18 @@ var (
 	bucketTypes = flag.String("bucket-types", "default,sets,maps", "")
 	parallel    = flag.Int("parallel", 10, "")
 	timeout     = flag.Duration("timeout", time.Minute*5, "")
+	backup      = flag.Bool("backup", false, "Backup mode")
+	backupDir   = flag.String("backup-dir", "./backup", "Dir for backups")
 )
 
 func main() {
 	flag.Parse()
 	http.DefaultClient.Timeout = *timeout
+
+	if *backup {
+		try(os.Mkdir(*backupDir, 0777))
+	}
+
 	for _, bType := range strings.Split(*bucketTypes, ",") {
 		try(syncBuckets(bType))
 	}
@@ -46,6 +54,10 @@ func syncBuckets(bucketType string) error {
 	}
 	defer res.Body.Close()
 
+	if *backup {
+		try(os.Mkdir(filepath.Join(*backupDir, bucketType), 0777))
+	}
+
 	var buckets struct {
 		Buckets []string `json:"buckets"`
 	}
@@ -65,8 +77,12 @@ func syncBuckets(bucketType string) error {
 func syncBucket(bucketType, bucket string) error {
 	log.Printf("INFO: start sync bucket '%s'\n", bucket)
 
-	if err := syncProperties(bucketType, bucket); err != nil {
-		return fmt.Errorf("props: %w", err)
+	if *backup {
+		try(os.Mkdir(filepath.Join(*backupDir, bucketType, bucket), 0777))
+	} else {
+		if err := syncProperties(bucketType, bucket); err != nil {
+			return fmt.Errorf("props: %w", err)
+		}
 	}
 
 	res, err := http.Get(*source + fmt.Sprintf("/types/%s/buckets/%s/keys?keys=true", bucketType, bucket))
@@ -130,6 +146,14 @@ func syncKey(bucketType, bucket, key string) error {
 
 	if res.StatusCode != 200 {
 		return fmt.Errorf("status code is %d", res.StatusCode)
+	}
+
+	if *backup {
+		buf, err := io.ReadAll(res.Body)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(*backupDir, bucketType, bucket, key), buf, 0666)
 	}
 
 	req, err := http.NewRequest("PUT", *destination+fmt.Sprintf("/types/%s/buckets/%s/keys/%s", bucketType, bucket, key), res.Body)
