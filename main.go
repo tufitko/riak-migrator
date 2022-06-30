@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -24,11 +26,17 @@ var (
 	backup       = flag.Bool("backup", false, "Backup mode")
 	backupDir    = flag.String("backup-dir", "./backup", "Dir for backups")
 	backupStdout = flag.Bool("backup-stdout", false, "Backup to stdout instead of file")
+	restoreStdin = flag.Bool("restore-stdin", false, "Restore from stdin")
 )
 
 func main() {
 	flag.Parse()
 	http.DefaultClient.Timeout = *timeout
+
+	if *restoreStdin {
+		try(restoreFromStdin())
+		return
+	}
 
 	if *backup && !*backupStdout {
 		try(os.Mkdir(*backupDir, 0777))
@@ -233,4 +241,69 @@ func syncProperties(bucketType, bucket string) error {
 		return fmt.Errorf("got unexpected status: %d, %s", resp.StatusCode, body)
 	}
 	return nil
+}
+
+func restoreFromStdin() error {
+	stdin := NewLineIterator(os.Stdin)
+	for {
+		line, err := stdin.Next()
+		if err == io.EOF {
+			break
+		}
+
+		var kv struct {
+			BucketType string `json:"bucket_type"`
+			Bucket     string `json:"bucket"`
+			Key        string `json:"key"`
+			Value      []byte `json:"value"`
+		}
+
+		err = json.Unmarshal(line, &kv)
+		if err != nil {
+			return err
+		}
+
+		req, err := http.NewRequest("PUT", *destination+fmt.Sprintf("/types/%s/buckets/%s/keys/%s", kv.BucketType, kv.Bucket, kv.Key), bytes.NewBuffer(kv.Value))
+		if err != nil {
+			return fmt.Errorf("new request err: %w", err)
+		}
+		req.Header.Add("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode != 200 && resp.StatusCode != 201 && resp.StatusCode != 204 {
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			return fmt.Errorf("got unexpected status: %d, %s", resp.StatusCode, body)
+		}
+		_ = resp.Body.Close()
+	}
+	log.Println("finish!")
+	return nil
+}
+
+type LineIterator struct {
+	reader *bufio.Reader
+}
+
+func NewLineIterator(rd io.Reader) *LineIterator {
+	return &LineIterator{
+		reader: bufio.NewReader(rd),
+	}
+}
+
+func (ln *LineIterator) Next() ([]byte, error) {
+	var bytes []byte
+	for {
+		line, isPrefix, err := ln.reader.ReadLine()
+		if err != nil {
+			return nil, err
+		}
+		bytes = append(bytes, line...)
+		if !isPrefix {
+			break
+		}
+	}
+	return bytes, nil
 }
