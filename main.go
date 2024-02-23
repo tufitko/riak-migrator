@@ -47,7 +47,7 @@ func main() {
 	}
 
 	if *backup && !*backupStdout {
-		try(os.Mkdir(*backupDir, 0o777))
+		try(os.Mkdir(*backupDir, 0777))
 	}
 
 	for _, bType := range strings.Split(*bucketTypes, ",") {
@@ -72,7 +72,7 @@ func syncBuckets(bucketType string) error {
 	defer res.Body.Close()
 
 	if *backup && !*backupStdout {
-		try(os.Mkdir(filepath.Join(*backupDir, bucketType), 0o777))
+		try(os.Mkdir(filepath.Join(*backupDir, bucketType), 0777))
 	}
 
 	var buckets struct {
@@ -102,7 +102,7 @@ func syncBucket(bucketType, bucket string) error {
 
 	if *backup {
 		if !*backupStdout {
-			try(os.Mkdir(filepath.Join(*backupDir, bucketType, bucket), 0o777))
+			try(os.Mkdir(filepath.Join(*backupDir, bucketType, bucket), 0777))
 		}
 	} else {
 		if err := syncProperties(bucketType, bucket); err != nil {
@@ -178,7 +178,7 @@ func syncKey(bucketType, bucket, key string) error {
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(filepath.Join(*backupDir, bucketType, bucket, key), buf, 0o666)
+		return os.WriteFile(filepath.Join(*backupDir, bucketType, bucket, key), buf, 0666)
 	}
 
 	if *backup && *backupStdout {
