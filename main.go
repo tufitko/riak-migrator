@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
@@ -18,15 +19,17 @@ import (
 )
 
 var (
-	source       = flag.String("source", "http://riak-0.riak:8098", "")
-	destination  = flag.String("destination", "http://riak-0.riak:8098", "")
-	bucketTypes  = flag.String("bucket-types", "default,sets,maps", "")
-	parallel     = flag.Int("parallel", 10, "")
-	timeout      = flag.Duration("timeout", time.Minute*5, "")
-	backup       = flag.Bool("backup", false, "Backup mode")
-	backupDir    = flag.String("backup-dir", "./backup", "Dir for backups")
-	backupStdout = flag.Bool("backup-stdout", false, "Backup to stdout instead of file")
-	restoreStdin = flag.Bool("restore-stdin", false, "Restore from stdin")
+	source        = flag.String("source", "http://riak-0.riak:8098", "")
+	destination   = flag.String("destination", "http://riak-0.riak:8098", "")
+	bucketTypes   = flag.String("bucket-types", "default,sets,maps", "")
+	parallel      = flag.Int("parallel", 10, "")
+	timeout       = flag.Duration("timeout", time.Minute*5, "")
+	backup        = flag.Bool("backup", false, "Backup mode")
+	skipExisting  = flag.Bool("skip-existing", false, "Skip existing files")
+	backupDir     = flag.String("backup-dir", "./backup", "Dir for backups")
+	restoreBackup = flag.Bool("restore-backup", false, "Restore from backup")
+	backupStdout  = flag.Bool("backup-stdout", false, "Backup to stdout instead of file")
+	restoreStdin  = flag.Bool("restore-stdin", false, "Restore from stdin")
 )
 
 func main() {
@@ -38,8 +41,13 @@ func main() {
 		return
 	}
 
+	if *restoreBackup {
+		try(restoreFromBackup())
+		return
+	}
+
 	if *backup && !*backupStdout {
-		try(os.Mkdir(*backupDir, 0777))
+		try(os.Mkdir(*backupDir, 0o777))
 	}
 
 	for _, bType := range strings.Split(*bucketTypes, ",") {
@@ -64,7 +72,7 @@ func syncBuckets(bucketType string) error {
 	defer res.Body.Close()
 
 	if *backup && !*backupStdout {
-		try(os.Mkdir(filepath.Join(*backupDir, bucketType), 0777))
+		try(os.Mkdir(filepath.Join(*backupDir, bucketType), 0o777))
 	}
 
 	var buckets struct {
@@ -75,6 +83,12 @@ func syncBuckets(bucketType string) error {
 	}
 
 	for _, bucket := range buckets.Buckets {
+		if *skipExisting && *backup && !*backupStdout {
+			if _, err := os.Stat(filepath.Join(*backupDir, bucketType)); !os.IsNotExist(err) {
+				continue
+			}
+		}
+
 		if err = syncBucket(bucketType, bucket); err != nil {
 			return fmt.Errorf("sync bucket %s err: %w", bucket, err)
 		}
@@ -88,7 +102,7 @@ func syncBucket(bucketType, bucket string) error {
 
 	if *backup {
 		if !*backupStdout {
-			try(os.Mkdir(filepath.Join(*backupDir, bucketType, bucket), 0777))
+			try(os.Mkdir(filepath.Join(*backupDir, bucketType, bucket), 0o777))
 		}
 	} else {
 		if err := syncProperties(bucketType, bucket); err != nil {
@@ -164,7 +178,7 @@ func syncKey(bucketType, bucket, key string) error {
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(filepath.Join(*backupDir, bucketType, bucket, key), buf, 0666)
+		return os.WriteFile(filepath.Join(*backupDir, bucketType, bucket, key), buf, 0o666)
 	}
 
 	if *backup && *backupStdout {
@@ -240,6 +254,84 @@ func syncProperties(bucketType, bucket string) error {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("got unexpected status: %d, %s", resp.StatusCode, body)
 	}
+	return nil
+}
+
+func restoreFromBackup() error {
+	allKeys := make([]string, 0)
+	count := 0
+
+	err := filepath.WalkDir(*backupDir, func(path string, file fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if file.IsDir() {
+			return nil
+		}
+
+		allKeys = append(allKeys, path)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	err = filepath.WalkDir(*backupDir, func(path string, file fs.DirEntry, err error) error {
+		count += 1
+		if count%1000 == 0 {
+			fmt.Println("Now I sync ", path)
+			fmt.Printf("Progress: %d/%d\n", count, len(allKeys))
+		}
+
+		var kv struct {
+			BucketType string `json:"bucket_type"`
+			Bucket     string `json:"bucket"`
+			Key        string `json:"key"`
+			Value      []byte `json:"value"`
+		}
+		if err != nil {
+			return err
+		}
+
+		if file.IsDir() {
+			return nil
+		}
+
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		pathSegments := strings.Split(path, "/")
+
+		kv.Key = pathSegments[len(pathSegments)-1]
+		kv.Bucket = pathSegments[len(pathSegments)-2]
+		kv.BucketType = pathSegments[len(pathSegments)-3]
+		kv.Value = b
+
+		req, err := http.NewRequest("PUT", *destination+fmt.Sprintf("/types/%s/buckets/%s/keys/%s", kv.BucketType, kv.Bucket, kv.Key), bytes.NewBuffer(kv.Value))
+		if err != nil {
+			fmt.Println(fmt.Errorf("new request err: %w", err))
+			return err
+		}
+		req.Header.Add("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			fmt.Println(err)
+			return err
+		}
+		if resp.StatusCode != 200 && resp.StatusCode != 201 && resp.StatusCode != 204 {
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			fmt.Println(fmt.Errorf("got unexpected status: %d, %s", resp.StatusCode, body))
+			return fmt.Errorf("got unexpected status: %d, %s", resp.StatusCode, body)
+		}
+		_ = resp.Body.Close()
+
+		return err
+	})
 	return nil
 }
 
